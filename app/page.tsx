@@ -5,19 +5,18 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getFirestore, collection, addDoc, onSnapshot,
   doc, setDoc, deleteDoc, query, orderBy, serverTimestamp,
-  where, writeBatch, getDocs
+  where, writeBatch, getDocs, Timestamp
 } from 'firebase/firestore';
 import {
   getAuth, signInAnonymously, onAuthStateChanged, updateProfile,
-  GoogleAuthProvider, signInWithPopup, signOut
+  GoogleAuthProvider, signInWithPopup, signOut, User as FirebaseUser
 } from 'firebase/auth';
 import {
-  ThumbsUp, ThumbsDown, Film, User, Link as LinkIcon,
+  ThumbsUp, ThumbsDown, Film, User as UserIcon, Link as LinkIcon,
   Trophy, Lock, Trash2, Edit2, X, KeyRound, AlertTriangle, LogOut, LogIn
 } from 'lucide-react';
 
 // --- FIREBASE CONFIGURATION ---
-// Tyto hodnoty načteme z .env.local souboru
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
@@ -27,20 +26,51 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
 };
 
-// Singleton init (aby se nereinicializovalo při hot-reloadu)
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 const db = getFirestore(app);
 const auth = getAuth(app);
 
-// Kolekce (zjednodušené pro produkci)
 const COLL_MOVIES = 'movies';
 const COLL_VOTES = 'votes';
 const COLL_CONFIG = 'config';
 const DOC_STATE = 'app_state';
 
+// --- TYPES & INTERFACES ---
+
+interface Movie {
+  id: string;
+  title: string;
+  link?: string;
+  comment?: string;
+  nominator: string;
+  nominatorId: string;
+  createdAt: Timestamp;
+}
+
+interface VoteDoc {
+  votes: Record<string, number>;
+  userName: string;
+  updatedAt: Timestamp;
+}
+
+interface ScoredMovie extends Movie {
+  plus: number;
+  minus: number;
+  total: number;
+  voters: { name: string; type: number }[];
+}
+
 // --- COMPONENTS ---
 
-const ConfirmModal = ({ isOpen, title, message, onConfirm, onCancel }) => {
+interface ConfirmModalProps {
+  isOpen: boolean;
+  title: string;
+  message: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+const ConfirmModal = ({ isOpen, title, message, onConfirm, onCancel }: ConfirmModalProps) => {
   if (!isOpen) return null;
   return (
     <div className="fixed inset-0 bg-black/90 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
@@ -59,7 +89,15 @@ const ConfirmModal = ({ isOpen, title, message, onConfirm, onCancel }) => {
   );
 };
 
-const UserIdentity = ({ user, onNameSet, isOpen, onClose }) => {
+interface UserIdentityProps {
+  user: FirebaseUser | null;
+  onNameSet: (name: string) => void;
+  isOpen: boolean;
+  onClose: () => void;
+  isUpdating?: boolean;
+}
+
+const UserIdentity = ({ user, onNameSet, isOpen, onClose }: UserIdentityProps) => {
   const [name, setName] = useState('');
 
   useEffect(() => {
@@ -68,7 +106,7 @@ const UserIdentity = ({ user, onNameSet, isOpen, onClose }) => {
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (name.trim()) onNameSet(name);
   };
@@ -77,7 +115,7 @@ const UserIdentity = ({ user, onNameSet, isOpen, onClose }) => {
     try {
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
-      onClose(); // Zavřít modal po úspěšném přihlášení
+      onClose();
     } catch (error) {
       console.error("Google login error", error);
       alert("Chyba při přihlášení Googlem");
@@ -96,7 +134,6 @@ const UserIdentity = ({ user, onNameSet, isOpen, onClose }) => {
         </div>
 
         <div className="space-y-6">
-          {/* Google Login Section */}
           {!user?.isAnonymous && user?.email ? (
             <div className="bg-green-900/30 p-3 rounded text-center border border-green-800">
               <p className="text-xs text-green-400 mb-1">Přihlášen jako:</p>
@@ -134,16 +171,23 @@ const UserIdentity = ({ user, onNameSet, isOpen, onClose }) => {
   );
 };
 
-const NominationPhase = ({ user, movies }) => {
+interface NominationPhaseProps {
+  user: FirebaseUser | null;
+  movies: Movie[];
+}
+
+const NominationPhase = ({ user, movies }: NominationPhaseProps) => {
   const [title, setTitle] = useState('');
   const [link, setLink] = useState('');
   const [comment, setComment] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [deleteModal, setDeleteModal] = useState({ isOpen: false, movieId: null, movieTitle: '' });
+  const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; movieId: string | null; movieTitle: string }>({
+    isOpen: false, movieId: null, movieTitle: ''
+  });
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || !user) return;
     setIsSubmitting(true);
 
     try {
@@ -173,11 +217,9 @@ const NominationPhase = ({ user, movies }) => {
     }
   };
 
-  const canDelete = (movie) => {
+  const canDelete = (movie: Movie) => {
     if (!user) return false;
-    // Admin (tomas.pouzar@gmail.com) can delete anything
     if (user.email === 'tomas.pouzar@gmail.com') return true;
-    // Users can delete their own
     return movie.nominatorId === user.uid;
   };
 
@@ -219,7 +261,7 @@ const NominationPhase = ({ user, movies }) => {
                   </button>
                 )}
               </div>
-              <div className="text-xs text-gray-400 mb-2 flex items-center gap-1"><User size={12} /> Nominoval: <span className="text-yellow-500">{movie.nominator}</span></div>
+              <div className="text-xs text-gray-400 mb-2 flex items-center gap-1"><UserIcon size={12} /> Nominoval: <span className="text-yellow-500">{movie.nominator}</span></div>
               {movie.comment && <p className="text-sm text-gray-300 italic mb-3">"{movie.comment}"</p>}
             </div>
             {movie.link && <a href={movie.link} target="_blank" rel="noreferrer" className="text-blue-400 text-sm hover:underline flex items-center gap-1 mt-2"><LinkIcon size={14} /> Detail filmu</a>}
@@ -230,8 +272,17 @@ const NominationPhase = ({ user, movies }) => {
   );
 };
 
-const VotingPhase = ({ user, movies, userVotes, remainingPlus, remainingMinus }) => {
-  const handleVote = async (movieId, type) => {
+interface VotingPhaseProps {
+  user: FirebaseUser | null;
+  movies: Movie[];
+  userVotes: Record<string, number>;
+  remainingPlus: number;
+  remainingMinus: number;
+}
+
+const VotingPhase = ({ user, movies, userVotes, remainingPlus, remainingMinus }: VotingPhaseProps) => {
+  const handleVote = async (movieId: string, type: 'plus' | 'minus') => {
+    if (!user) return;
     const currentVote = userVotes[movieId] || 0;
     let newVote = 0;
 
@@ -288,9 +339,14 @@ const VotingPhase = ({ user, movies, userVotes, remainingPlus, remainingMinus })
   );
 };
 
-const ResultsPhase = ({ movies, allVotes }) => {
+interface ResultsPhaseProps {
+  movies: Movie[];
+  allVotes: VoteDoc[];
+}
+
+const ResultsPhase = ({ movies, allVotes }: ResultsPhaseProps) => {
   const results = useMemo(() => {
-    const scores = movies.map(m => ({ ...m, plus: 0, minus: 0, total: 0, voters: [] }));
+    const scores: ScoredMovie[] = movies.map(m => ({ ...m, plus: 0, minus: 0, total: 0, voters: [] }));
     allVotes.forEach(voteDoc => {
       if (!voteDoc.votes) return;
       Object.entries(voteDoc.votes).forEach(([movieId, value]) => {
@@ -339,16 +395,23 @@ const ResultsPhase = ({ movies, allVotes }) => {
   );
 };
 
-const AdminPanel = ({ currentPhase, onSetPhase, movies, user }) => {
+interface AdminPanelProps {
+  currentPhase: string;
+  onSetPhase: (phase: string) => void;
+  movies: Movie[];
+  user: FirebaseUser | null;
+}
+
+const AdminPanel = ({ currentPhase, onSetPhase, movies, user }: AdminPanelProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [csvText, setCsvText] = useState('');
   const [password, setPassword] = useState('');
   const [isUnlocked, setIsUnlocked] = useState(false);
 
-  // Zde kontrolujeme email. Vercel verze má reálný auth, takže toto bude fungovat.
   const isEmailAdmin = user?.email === 'tomas.pouzar@gmail.com';
 
   const handleImport = async () => {
+    if (!user) return;
     const lines = csvText.split('\n');
     let added = 0;
     for (const line of lines) {
@@ -362,7 +425,7 @@ const AdminPanel = ({ currentPhase, onSetPhase, movies, user }) => {
             nominator: parts[2]?.trim() || "Admin Import",
             comment: parts[3]?.trim() || "",
             createdAt: serverTimestamp(),
-            nominatorId: user.uid // Admin se stává vlastníkem importu
+            nominatorId: user.uid
           });
           added++;
         } catch (e) { console.error(e); }
@@ -372,9 +435,8 @@ const AdminPanel = ({ currentPhase, onSetPhase, movies, user }) => {
     setCsvText('');
   };
 
-  const checkPassword = (e) => {
+  const checkPassword = (e: React.FormEvent) => {
     e.preventDefault();
-    // Hash pro "kuho"
     let h = 0; for (let i = 0; i < password.length; i++) h = Math.imul(31, h) + password.charCodeAt(i) | 0;
     if (h === 3303409) { setIsUnlocked(true); setPassword(''); } else alert('Špatné heslo');
   };
@@ -418,47 +480,41 @@ const AdminPanel = ({ currentPhase, onSetPhase, movies, user }) => {
 };
 
 export default function Home() {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
   const [phase, setPhase] = useState('nomination');
-  const [movies, setMovies] = useState([]);
-  const [myVotes, setMyVotes] = useState({});
-  const [allVotes, setAllVotes] = useState([]);
+  const [movies, setMovies] = useState<Movie[]>([]);
+  const [myVotes, setMyVotes] = useState<Record<string, number>>({});
+  const [allVotes, setAllVotes] = useState<VoteDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [isEditingName, setIsEditingName] = useState(false);
   const [isUpdatingName, setIsUpdatingName] = useState(false);
 
-  // 1. Auth Init
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       if (u) {
         setUser(u);
         setLoading(false);
       } else {
-        // Pokud není přihlášený, přihlásíme anonymně
         signInAnonymously(auth).catch(e => console.error("Anon auth fail", e));
       }
     });
     return unsubscribe;
   }, []);
 
-  // 2. Data Listeners
   useEffect(() => {
     if (!user) return;
 
-    // Config
     const unsubConfig = onSnapshot(doc(db, COLL_CONFIG, DOC_STATE), (snap) => {
       if (snap.exists()) setPhase(snap.data().currentPhase || 'nomination');
       else setDoc(doc(db, COLL_CONFIG, DOC_STATE), { currentPhase: 'nomination' });
     });
 
-    // Movies
     const unsubMovies = onSnapshot(query(collection(db, COLL_MOVIES), orderBy('createdAt', 'desc')), (snap) => {
-      setMovies(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setMovies(snap.docs.map(d => ({ id: d.id, ...d.data() } as Movie)));
     });
 
-    // Votes
     const unsubVotes = onSnapshot(collection(db, COLL_VOTES), (snap) => {
-      setAllVotes(snap.docs.map(d => d.data()));
+      setAllVotes(snap.docs.map(d => d.data() as VoteDoc));
       const myVoteDoc = snap.docs.find(d => d.id === user.uid);
       setMyVotes(myVoteDoc ? (myVoteDoc.data().votes || {}) : {});
     });
@@ -466,23 +522,18 @@ export default function Home() {
     return () => { unsubConfig(); unsubMovies(); unsubVotes(); };
   }, [user]);
 
-  // Update Name Logic (Robust)
-  const handleUpdateName = async (name) => {
+  const handleUpdateName = async (name: string) => {
     if (user) {
       setIsUpdatingName(true);
       try {
-        const oldName = user.displayName;
         await updateProfile(user, { displayName: name });
-        setUser((prev) => ({ ...prev, displayName: name }));
+        setUser((prev) => prev ? ({ ...prev, displayName: name }) as FirebaseUser : null);
 
         const batch = writeBatch(db);
-
-        // Update movies owned by ID
         const qById = query(collection(db, COLL_MOVIES), where("nominatorId", "==", user.uid));
         const snapById = await getDocs(qById);
         snapById.forEach(d => batch.update(d.ref, { nominator: name }));
 
-        // Update vote doc
         batch.set(doc(db, COLL_VOTES, user.uid), { userName: name }, { merge: true });
 
         await batch.commit();
@@ -495,7 +546,7 @@ export default function Home() {
     }
   };
 
-  const handleSetPhase = async (newPhase) => {
+  const handleSetPhase = async (newPhase: string) => {
     await setDoc(doc(db, COLL_CONFIG, DOC_STATE), { currentPhase: newPhase }, { merge: true });
   };
 
@@ -538,8 +589,7 @@ export default function Home() {
               {user?.displayName || 'Anonym'}
               <Edit2 size={12} className="opacity-50 group-hover:opacity-100 transition-opacity" />
             </div>
-            {/* Odhlášení tlačítko pro testování nebo přepnutí účtu */}
-            {!user.isAnonymous && (
+            {!user?.isAnonymous && (
               <button onClick={() => signOut(auth)} className="text-xs text-red-400 hover:underline mt-1 flex items-center justify-end gap-1 w-full">
                 <LogOut size={10} /> Odhlásit se
               </button>
