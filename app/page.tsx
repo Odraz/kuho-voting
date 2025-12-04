@@ -116,9 +116,15 @@ const UserIdentity = ({ user, onNameSet, isOpen, onClose }: UserIdentityProps) =
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
       onClose();
-    } catch (error) {
+    } catch (error: any) {
       console.error("Google login error", error);
-      alert("Chyba při přihlášení Googlem");
+      if (error?.code === 'auth/unauthorized-domain') {
+        alert(`Doména "${window.location.hostname}" není povolena v Firebase Console.\n\nJděte do Authentication -> Settings -> Authorized domains a přidejte ji.`);
+      } else if (error?.code === 'auth/popup-closed-by-user') {
+        // User closed the popup, no error needed
+      } else {
+        alert("Chyba při přihlášení Googlem: " + (error?.message || 'Neznámá chyba'));
+      }
     }
   };
 
@@ -405,10 +411,13 @@ interface AdminPanelProps {
 const AdminPanel = ({ currentPhase, onSetPhase, movies, user }: AdminPanelProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [csvText, setCsvText] = useState('');
-  const [password, setPassword] = useState('');
-  const [isUnlocked, setIsUnlocked] = useState(false);
 
+  // Strict check: Only this specific email sees the panel
   const isEmailAdmin = user?.email === 'tomas.pouzar@gmail.com';
+
+  if (!isEmailAdmin) {
+    return null;
+  }
 
   const handleImport = async () => {
     if (!user) return;
@@ -435,27 +444,10 @@ const AdminPanel = ({ currentPhase, onSetPhase, movies, user }: AdminPanelProps)
     setCsvText('');
   };
 
-  const checkPassword = (e: React.FormEvent) => {
-    e.preventDefault();
-    let h = 0; for (let i = 0; i < password.length; i++) h = Math.imul(31, h) + password.charCodeAt(i) | 0;
-    if (h === 3303409) { setIsUnlocked(true); setPassword(''); } else alert('Špatné heslo');
-  };
-
-  if (!isEmailAdmin && !isUnlocked) {
-    return (
-      <div className="mt-12 border-t border-gray-800 pt-8 flex justify-center">
-        <form onSubmit={checkPassword} className="flex gap-2">
-          <input type="password" placeholder="Admin heslo" className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white text-xs" value={password} onChange={e => setPassword(e.target.value)} />
-          <button type="submit" className="bg-gray-800 text-gray-400 p-2 rounded hover:bg-gray-700 hover:text-white transition-colors"><KeyRound size={14} /></button>
-        </form>
-      </div>
-    );
-  }
-
   return (
     <div className="mt-12 border-t border-gray-800 pt-8">
       <button onClick={() => setIsOpen(!isOpen)} className="text-gray-600 text-xs flex items-center gap-1 hover:text-gray-400">
-        <Lock size={12} /> Administrace {isEmailAdmin ? '(Tomas Pouzar)' : '(Heslo OK)'}
+        <Lock size={12} /> Administrace (Tomas Pouzar)
       </button>
       {isOpen && (
         <div className="mt-4 bg-gray-900 p-4 rounded border border-gray-700 space-y-4">
