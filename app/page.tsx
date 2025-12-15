@@ -332,6 +332,7 @@ const VotingPhase = ({ user, movies, userVotes, remainingPlus, remainingMinus }:
                 <h4 className="font-bold text-white text-lg">{movie.title}</h4>
                 <div className="text-sm text-gray-400">Nominoval: {movie.nominator}</div>
                 {movie.comment && <p className="text-xs text-gray-500 mt-1 italic">"{movie.comment}"</p>}
+                {movie.link && <a href={movie.link} target="_blank" rel="noreferrer" className="text-blue-400 text-sm hover:underline flex items-center gap-1 mt-1"><LinkIcon size={14} /> Detail filmu</a>}
               </div>
               <div className="flex items-center gap-3">
                 <button onClick={() => handleVote(movie.id, 'minus')} disabled={myVote !== -1 && remainingMinus === 0} className={`p-3 rounded-full transition ${myVote === -1 ? 'bg-red-600 text-white shadow-lg scale-110' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'} disabled:opacity-30`}><ThumbsDown size={24} /></button>
