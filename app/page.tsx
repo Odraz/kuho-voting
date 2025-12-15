@@ -92,23 +92,67 @@ const ConfirmModal = ({ isOpen, title, message, onConfirm, onCancel }: ConfirmMo
 interface UserIdentityProps {
   user: FirebaseUser | null;
   onNameSet: (name: string) => void;
+  onCheckAvailability: (name: string) => Promise<{ isTaken: boolean; oldUid?: string }>;
+  onResumeSession: (name: string, oldUid: string) => Promise<void>;
   isOpen: boolean;
   onClose: () => void;
   isUpdating?: boolean;
 }
 
-const UserIdentity = ({ user, onNameSet, isOpen, onClose }: UserIdentityProps) => {
+const UserIdentity = ({ user, onNameSet, onCheckAvailability, onResumeSession, isOpen, onClose }: UserIdentityProps) => {
   const [name, setName] = useState('');
+  const [conflict, setConflict] = useState<{ isTaken: boolean; oldUid?: string } | null>(null);
+  const [isChecking, setIsChecking] = useState(false);
+  const [isResuming, setIsResuming] = useState(false);
 
   useEffect(() => {
     if (user?.displayName) setName(user.displayName);
+    setConflict(null);
   }, [user, isOpen]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (name.trim()) onNameSet(name);
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    if (user?.displayName === trimmed) {
+      onClose();
+      return;
+    }
+
+    setIsChecking(true);
+    try {
+      const result = await onCheckAvailability(trimmed);
+      if (result.isTaken && result.oldUid) {
+        // Auto-resume found session
+        await onResumeSession(trimmed, result.oldUid);
+      } else {
+        // Standard rename
+        onNameSet(trimmed);
+      }
+      onClose();
+    } catch (e) {
+      console.error(e);
+      alert("Chyba při nastavování jména.");
+    } finally {
+      setIsChecking(false);
+    }
+  };
+
+  const handleResume = async () => {
+    if (!conflict?.oldUid || !name.trim()) return;
+    setIsResuming(true);
+    try {
+      await onResumeSession(name.trim(), conflict.oldUid);
+      onClose();
+    } catch (e) {
+      console.error(e);
+      alert("Chyba při obnovování session.");
+    } finally {
+      setIsResuming(false);
+    }
   };
 
   const handleGoogleLogin = async () => {
@@ -131,12 +175,10 @@ const UserIdentity = ({ user, onNameSet, isOpen, onClose }: UserIdentityProps) =
   return (
     <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
       <div className="bg-gray-800 p-8 rounded-xl max-w-md w-full border border-gray-700 shadow-2xl relative">
-        <button onClick={onClose} className="absolute top-4 right-4 text-gray-500 hover:text-white"><X size={20} /></button>
-
         <div className="text-center mb-6">
           <Film className="w-12 h-12 text-yellow-500 mx-auto mb-2" />
           <h2 className="text-2xl font-bold text-white">KUHO</h2>
-          <p className="text-gray-400">Nastavení identity</p>
+          <p className="text-gray-400">Přihlášení</p>
         </div>
 
         <div className="space-y-6">
@@ -159,18 +201,22 @@ const UserIdentity = ({ user, onNameSet, isOpen, onClose }: UserIdentityProps) =
             <div className="relative flex justify-center text-xs uppercase"><span className="bg-gray-800 px-2 text-gray-500">Nebo jen přezdívka</span></div>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Tvoje přezdívka"
-              className="w-full p-3 bg-gray-900 border border-gray-600 rounded text-white focus:border-yellow-500 outline-none"
-            />
-            <button type="submit" disabled={!name?.trim()} className="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-3 rounded transition">
-              Uložit jméno
-            </button>
-          </form>
+
+
+          <div className="space-y-4">
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Tvoje přezdívka"
+                className="w-full p-3 bg-gray-900 border border-gray-600 rounded text-white focus:border-yellow-500 outline-none"
+              />
+              <button type="submit" disabled={!name?.trim() || isChecking} className="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-3 rounded transition flex justify-center">
+                {isChecking ? "Načítám..." : "Vstoupit"}
+              </button>
+            </form>
+          </div>
         </div>
       </div>
     </div>
@@ -472,6 +518,8 @@ const AdminPanel = ({ currentPhase, onSetPhase, movies, user }: AdminPanelProps)
   );
 };
 
+
+// export default function Home() ... [Modified part below]
 export default function Home() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [phase, setPhase] = useState('nomination');
@@ -515,11 +563,67 @@ export default function Home() {
     return () => { unsubConfig(); unsubMovies(); unsubVotes(); };
   }, [user]);
 
+  const checkAvailability = async (name: string) => {
+    if (!user) return { isTaken: false };
+    const q = query(collection(db, COLL_VOTES), where("userName", "==", name));
+    const snap = await getDocs(q);
+
+    // Check if any finding is NOT me
+    const match = snap.docs.find(d => d.id !== user.uid);
+    if (match) {
+      return { isTaken: true, oldUid: match.id };
+    }
+    return { isTaken: false };
+  };
+
+  const handleResumeSession = async (name: string, oldUid: string) => {
+    if (!user) return;
+
+    // 1. Get old data
+    const oldVoteSnap = await getDocs(query(collection(db, COLL_VOTES), where("__name__", "==", oldUid)));
+    if (oldVoteSnap.empty) return;
+
+    const oldVoteData = oldVoteSnap.docs[0].data();
+
+    const batch = writeBatch(db);
+
+    // 2. Set my votes to old votes
+    batch.set(doc(db, COLL_VOTES, user.uid), {
+      ...oldVoteData,
+      userName: name, // Ensure name is correct
+      updatedAt: serverTimestamp()
+    });
+
+    // 3. Delete old vote doc
+    batch.delete(doc(db, COLL_VOTES, oldUid));
+
+    // 4. Update movies ownership
+    const qMovies = query(collection(db, COLL_MOVIES), where("nominatorId", "==", oldUid));
+    const movieSnaps = await getDocs(qMovies);
+    movieSnaps.forEach(d => {
+      const data = d.data();
+      // Only update nominator name if it matches the user we are resuming (preserves Admin Imports)
+      const updateData: any = { nominatorId: user.uid };
+      if (data.nominator === name) {
+        updateData.nominator = name;
+      }
+      batch.update(d.ref, updateData);
+    });
+
+    // 5. Update my profile
+    if (auth.currentUser) {
+      await updateProfile(auth.currentUser, { displayName: name });
+      setUser((prev) => prev ? ({ ...prev, displayName: name }) as FirebaseUser : null);
+    }
+
+    await batch.commit();
+  };
+
   const handleUpdateName = async (name: string) => {
-    if (user) {
+    if (auth.currentUser && user) {
       setIsUpdatingName(true);
       try {
-        await updateProfile(user, { displayName: name });
+        await updateProfile(auth.currentUser, { displayName: name });
         setUser((prev) => prev ? ({ ...prev, displayName: name }) as FirebaseUser : null);
 
         const batch = writeBatch(db);
@@ -554,9 +658,11 @@ export default function Home() {
       <UserIdentity
         user={user}
         onNameSet={handleUpdateName}
-        isOpen={isEditingName || (!user?.displayName && !loading)}
+        onCheckAvailability={checkAvailability}
+        onResumeSession={handleResumeSession}
+        isOpen={!user?.displayName && !loading}
         isUpdating={isUpdatingName}
-        onClose={() => setIsEditingName(false)}
+        onClose={() => { }} // Block closing if no name
       />
 
       <div className="max-w-4xl mx-auto p-4 md:p-8">
@@ -575,16 +681,19 @@ export default function Home() {
           <div className="text-right hidden sm:block group">
             <div className="text-xs text-gray-500">Přihlášen jako</div>
             <div
-              className="font-bold text-yellow-500 flex items-center gap-2 cursor-pointer hover:text-white transition-colors justify-end"
-              onClick={() => setIsEditingName(true)}
-              title="Změnit přezdívku"
+              className="font-bold text-yellow-500 flex items-center gap-2 justify-end"
+              title="Přihlášený uživatel"
             >
               {user?.displayName || 'Anonym'}
-              <Edit2 size={12} className="opacity-50 group-hover:opacity-100 transition-opacity" />
             </div>
             {!user?.isAnonymous && (
               <button onClick={() => signOut(auth)} className="text-xs text-red-400 hover:underline mt-1 flex items-center justify-end gap-1 w-full">
                 <LogOut size={10} /> Odhlásit se
+              </button>
+            )}
+            {user?.isAnonymous && (
+              <button onClick={() => signOut(auth)} className="text-xs text-gray-500 hover:text-white mt-1 flex items-center justify-end gap-1 w-full transition-colors">
+                <LogOut size={10} /> Nová relace
               </button>
             )}
           </div>
