@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { deleteDoc } from 'firebase/firestore';
-import { Archive, KeyRound, Lock, LogOut, Trash2 } from 'lucide-react';
+import { Archive, KeyRound, Lock, LogOut, Sheet, Trash2 } from 'lucide-react';
+import { googleSheetTsvUrl, parseImport, splitDuplicates } from '@/lib/importParser';
 import {
   becomeAdmin, createEdition, importMovies, leaveAdmin, legacyDataExists,
   migrateLegacy, paths, setCurrentEdition, updateEdition,
@@ -74,7 +75,6 @@ export function AdminPanel(props: Props) {
 function AdminTools({ editions, currentEditionId, edition, movies, ballots, onLogout }: Props & { onLogout: () => void }) {
   const nextYear = Math.max(new Date().getFullYear(), ...editions.map(e => e.year + 1));
   const [newYear, setNewYear] = useState(String(nextYear));
-  const [csvText, setCsvText] = useState('');
   const [legacy, setLegacy] = useState<boolean | null>(null);
   const [confirm, setConfirm] = useState<{ title: string; message: string; label: string; action: () => Promise<void> } | null>(null);
 
@@ -186,20 +186,95 @@ function AdminTools({ editions, currentEditionId, edition, movies, ballots, onLo
             </div>
           </div>
 
-          <div>
-            <p className="text-gray-400 mb-1">Hromadný import filmů (řádek = název ⇥ odkaz ⇥ nominující ⇥ komentář, např. zkopírováno z Excelu)</p>
-            <textarea className="w-full h-24 bg-black text-xs text-gray-300 p-2 border border-gray-700 rounded font-mono" placeholder={'Matrix\thttps://www.csfd.cz/...\tPepa\tMusíme vidět!'} value={csvText} onChange={e => setCsvText(e.target.value)} />
-            <button disabled={!csvText.trim()} onClick={() => run(async () => {
-              const n = await importMovies(edition.id, csvText);
-              setCsvText('');
-              toast(`Importováno ${n} filmů.`, 'info');
-            }, 'Import hotov.')} className="mt-1 bg-blue-900 text-blue-200 px-3 py-1 rounded border border-blue-700 hover:bg-blue-800 disabled:opacity-50">Importovat</button>
-            <p className="text-xs text-gray-500 mt-1">Filmů v ročníku: {movies.length}</p>
-          </div>
+          <ImportSection edition={edition} movies={movies} />
         </section>
       )}
 
       <button onClick={onLogout} className="text-gray-500 hover:text-white flex items-center gap-1"><LogOut size={12} /> Odhlásit administraci</button>
+    </div>
+  );
+}
+
+function ImportSection({ edition, movies }: { edition: Edition; movies: Movie[] }) {
+  const [sheetUrl, setSheetUrl] = useState('');
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const { fresh, duplicates } = useMemo(
+    () => splitDuplicates(parseImport(text), movies.map(m => m.title)),
+    [text, movies],
+  );
+
+  const loadSheet = async () => {
+    const url = googleSheetTsvUrl(sheetUrl.trim());
+    if (!url) { toast('Tohle nevypadá jako odkaz na Google tabulku.', 'error'); return; }
+    setBusy(true);
+    try {
+      const res = await fetch(url);
+      const body = await res.text();
+      if (!res.ok || body.trimStart().startsWith('<')) throw new Error('Tabulku se nepodařilo načíst. Je sdílená jako „Kdokoli s odkazem může zobrazit“?');
+      setText(body);
+    } catch (err) {
+      toastError(err, 'Tabulku se nepodařilo načíst.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doImport = async () => {
+    setBusy(true);
+    try {
+      const n = await importMovies(edition.id, fresh);
+      setText('');
+      toast(`Importováno ${n} filmů${duplicates.length ? `, ${duplicates.length} duplicit přeskočeno` : ''}.`, 'success');
+    } catch (err) {
+      toastError(err, 'Import se nepovedl.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <p className="text-white font-bold">Hromadný import filmů</p>
+      <p className="text-gray-400">
+        Sloupce: název ⇥ odkaz ⇥ nominující ⇥ komentář. Buď vlož odkaz na Google tabulku, nebo řádky zkopíruj
+        z Excelu / Sheets do pole níže. Hlavička i filmy, které už v ročníku jsou, se přeskočí.
+      </p>
+      <div className="flex gap-2">
+        <input type="url" value={sheetUrl} onChange={e => setSheetUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/d/…" className={inputClass} />
+        <button disabled={!sheetUrl.trim() || busy} onClick={loadSheet} className="shrink-0 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white px-3 rounded flex items-center gap-1">
+          <Sheet size={14} /> Načíst
+        </button>
+      </div>
+      <textarea className="w-full h-24 bg-black text-xs text-gray-300 p-2 border border-gray-700 rounded font-mono" placeholder={'Matrix\thttps://www.csfd.cz/...\tPepa\tMusíme vidět!'} value={text} onChange={e => setText(e.target.value)} />
+
+      {(fresh.length > 0 || duplicates.length > 0) && (
+        <div className="border border-gray-700 rounded overflow-x-auto max-h-72 overflow-y-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-800 text-gray-400 text-left sticky top-0">
+              <tr><th className="p-2">Film</th><th className="p-2">Nominoval/a</th><th className="p-2">Komentář</th><th className="p-2">Odkaz</th></tr>
+            </thead>
+            <tbody>
+              {[...fresh.map(r => ({ r, dup: false })), ...duplicates.map(r => ({ r, dup: true }))].map(({ r, dup }, i) => (
+                <tr key={i} className={`border-t border-gray-800 ${dup ? 'text-gray-600' : 'text-gray-300'}`}>
+                  <td className="p-2"><span className={dup ? 'line-through' : ''}>{r.title}</span>{dup && <span className="ml-1 text-yellow-600">(už existuje – přeskočí se)</span>}</td>
+                  <td className="p-2">{r.nominator}</td>
+                  <td className="p-2">{r.comment}</td>
+                  <td className="p-2">{r.link ? '✓' : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3">
+        <button disabled={!fresh.length || busy} onClick={doImport} className="bg-blue-900 text-blue-200 px-3 py-1.5 rounded border border-blue-700 hover:bg-blue-800 disabled:opacity-50">
+          {busy ? 'Pracuji…' : `Importovat ${fresh.length} filmů do ${edition.name}`}
+        </button>
+        <span className="text-xs text-gray-500">Filmů v ročníku: {movies.length}{duplicates.length ? ` · duplicit: ${duplicates.length}` : ''}</span>
+      </div>
     </div>
   );
 }

@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import { Edit2, Film, Link as LinkIcon, Trash2, User as UserIcon, X } from 'lucide-react';
 import { addMovie, deleteMovie, updateMovie, type MovieInput } from '@/lib/data';
+import { normalizeTitle } from '@/lib/importParser';
 import { toast, toastError } from '@/lib/toast';
 import type { Edition, Movie, Player } from '@/lib/types';
 import { ConfirmModal, inputClass } from './ui';
@@ -15,7 +16,6 @@ interface Props {
 }
 
 const EMPTY: MovieInput = { title: '', link: '', comment: '' };
-const normalizeTitle = (t: string) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 export function NominationPhase({ edition, player, movies, isAdmin }: Props) {
   const [form, setForm] = useState<MovieInput>(EMPTY);

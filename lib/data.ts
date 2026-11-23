@@ -6,6 +6,7 @@ import {
 } from 'firebase/firestore';
 import { getFirebase } from './firebase';
 import { cleanNickname, nicknameKey } from './nickname';
+import { DEFAULT_IMPORT_NOMINATOR, type ImportRow } from './importParser';
 import type { Ballot, Edition, Movie, Phase, Player } from './types';
 
 // --- Collection layout -------------------------------------------------------
@@ -170,16 +171,13 @@ export async function updateEdition(editionId: string, data: Partial<Omit<Editio
   await updateDoc(paths.edition(editionId), data);
 }
 
-/** Tab-separated lines: title \t link \t nominator \t comment */
-export async function importMovies(editionId: string, text: string): Promise<number> {
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+/** Writes already parsed (and de-duplicated) rows – see lib/importParser.ts. */
+export async function importMovies(editionId: string, rows: ImportRow[]): Promise<number> {
   const batches = new Chunker();
-  for (const line of lines) {
-    const [title, link = '', nominator = 'Import', comment = ''] = line.split('\t').map(s => s.trim());
-    if (!title) continue;
-    const name = cleanNickname(nominator) || 'Import';
+  for (const row of rows) {
+    const name = cleanNickname(row.nominator) || DEFAULT_IMPORT_NOMINATOR;
     batches.next().set(doc(paths.movies(editionId)), {
-      ...normalizeMovieInput({ title, link, comment }),
+      ...normalizeMovieInput(row),
       nominator: name,
       nominatorKey: nicknameKey(name),
       createdAt: serverTimestamp(),
