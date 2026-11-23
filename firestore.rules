@@ -1,0 +1,124 @@
+rules_version = '2';
+
+// KUHO voting – Firestore security rules.
+// Publish via Firebase Console (Firestore Database -> Rules) or `npx firebase-tools deploy --only firestore:rules`.
+//
+// Identity model: every browser signs in anonymously (request.auth != null),
+// players are identified by nickname. Admins prove themselves with a PIN that is
+// stored in `secrets/admin` (create it manually in the console – clients can never read it).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function edition(id) {
+      return get(/databases/$(database)/documents/editions/$(id)).data;
+    }
+
+    function isOpen(id, phase) {
+      let e = edition(id);
+      return e.phase == phase && e.get('archived', false) == false;
+    }
+
+    function shortString(value, min, max) {
+      return value is string && value.size() >= min && value.size() <= max;
+    }
+
+    // --- Secrets: never accessible from the app -------------------------------
+    match /secrets/{doc} {
+      allow read, write: if false;
+    }
+
+    // --- Admin sessions ---------------------------------------------------------
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['pin', 'createdAt'])
+        && request.resource.data.pin == get(/databases/$(database)/documents/secrets/admin).data.pin;
+      allow delete: if signedIn() && request.auth.uid == uid;
+      allow list, update: if false;
+    }
+
+    // --- Global app config (current edition) ------------------------------------
+    match /config/{doc} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // --- Players (nicknames) ------------------------------------------------------
+    match /players/{key} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['name', 'createdAt'])
+        && shortString(request.resource.data.name, 1, 30)
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if isAdmin();
+    }
+
+    // --- Editions (one per year) --------------------------------------------------
+    match /editions/{editionId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+
+      match /movies/{movieId} {
+        function validMovie(data) {
+          return shortString(data.title, 1, 200)
+            && shortString(data.link, 0, 500)
+            && shortString(data.comment, 0, 500)
+            && shortString(data.nominator, 1, 30)
+            && shortString(data.nominatorKey, 1, 64);
+        }
+
+        allow read: if signedIn();
+        allow create: if isAdmin() || (signedIn()
+          && isOpen(editionId, 'nomination')
+          && request.resource.data.keys().hasOnly(['title', 'link', 'comment', 'nominator', 'nominatorKey', 'createdAt'])
+          && validMovie(request.resource.data)
+          && request.resource.data.createdAt == request.time);
+        allow update: if isAdmin() || (signedIn()
+          && isOpen(editionId, 'nomination')
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'link', 'comment'])
+          && validMovie(request.resource.data));
+        allow delete: if isAdmin() || (signedIn() && isOpen(editionId, 'nomination'));
+      }
+
+      match /votes/{playerKey} {
+        function validBallot(data) {
+          let e = edition(editionId);
+          return data.keys().hasOnly(['name', 'plus', 'minus', 'updatedAt'])
+            && shortString(data.name, 1, 30)
+            && data.plus is list && data.minus is list
+            && data.plus.size() <= e.get('plusVotes', 7)
+            && data.minus.size() <= e.get('minusVotes', 1)
+            && !data.plus.hasAny(data.minus)
+            && data.updatedAt == request.time;
+        }
+
+        allow read: if signedIn();
+        allow create, update: if isAdmin() || (signedIn()
+          && isOpen(editionId, 'voting')
+          && validBallot(request.resource.data));
+        allow delete: if isAdmin();
+      }
+    }
+
+    // --- Legacy (2025) top-level collections: read-only, kept as a backup ----------
+    match /movies/{id} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /votes/{id} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // Everything else is closed.
+  }
+}
